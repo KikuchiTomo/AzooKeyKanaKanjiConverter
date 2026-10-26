@@ -1182,13 +1182,15 @@ enum ZenzaiTypoCandidateGenerator {
 
         // 打ち忘れ: 観測した文字の前に，打ち忘れたかもしれない文字（母音と，直前と同じ文字）を補う
         if let omissionCost = keyTopology.omissionCost {
+            let prev = baseState.prevInputPiece.flatMap(Self.canonicalCharacter(for:))
             var missing = KeyTopology.romajiVowels
-            if let prev = baseState.prevInputPiece.flatMap(Self.canonicalCharacter(for:)) { missing.insert(prev) }
+            if let prev { missing.insert(prev) }
             for character in missing.sorted() {
+                // 同じキーの 2 回目の打ち忘れ(「ii」の 1 つ抜け)は起きやすいので，手間を半分にする
                 addAdvance(
                     trueSeq: [character, observed],
                     observedCount: 1,
-                    channelAdd: omissionCost,
+                    channelAdd: character == prev ? omissionCost / 2 : omissionCost,
                     lastInputPiece: observedElement.inputPiece
                 )
             }
