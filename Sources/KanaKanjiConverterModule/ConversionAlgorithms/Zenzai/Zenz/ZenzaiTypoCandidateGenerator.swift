@@ -916,7 +916,9 @@ enum ZenzaiTypoCandidateGenerator {
         guard !mergedFinals.isEmpty else {
             return []
         }
-        let sorted = mergedFinals.sorted(by: { $0.score > $1.score })
+        // 点数が同じ仮説の並びを訂正後の入力で決める．並びが決まらないと，打ち切り(nBest)で残る候補が実行ごとに変わり，
+        // インクリメンタルな探索と全体の探索の結果が食い違う
+        let sorted = mergedFinals.sorted(by: { $0.score != $1.score ? $0.score > $1.score : $0.correctedInput < $1.correctedInput })
         let bestScore = sorted[0].score
 
         var unique: [String: ZenzaiTypoCandidate] = [:]
@@ -939,7 +941,9 @@ enum ZenzaiTypoCandidateGenerator {
             }
         }
 
-        return Array(unique.values.sorted(by: { $0.score > $1.score }).prefix(experimentalConfig.nBest))
+        // unique は辞書なので取り出す順が決まらない．点数が同じなら訂正後の入力の順にする
+        return Array(unique.values.sorted(by: { $0.score != $1.score ? $0.score > $1.score : $0.correctedInput < $1.correctedInput })
+            .prefix(experimentalConfig.nBest))
     }
 
     private static func resolveGenerationConfig(inputStyle: InputStyle) -> TypoGenerationConfig {
