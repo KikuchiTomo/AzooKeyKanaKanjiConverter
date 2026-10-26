@@ -391,6 +391,25 @@ public final class KanaKanjiConverter {
         }
     }
 
+    /// 与えた入力をそのまま読んだときの Zenzai の言語モデルの点数(対数確率)。入力ごとに返し、使えなければ nil。
+    /// ほかの方法で作った打ち間違いの訂正の候補を、文脈を見て比べるために使う。
+    public func experimentalScoreTypoInputs(
+        leftSideContext: String,
+        inputs: [ComposingText],
+        options: ConvertRequestOptions,
+        inputStyle: InputStyle
+    ) -> [Float?] {
+        guard options.zenzaiMode.enabled, let zenz = self.getModel(modelURL: options.zenzaiMode.weightURL) else {
+            return inputs.map { _ in nil }
+        }
+        return zenz.scoreTypoInputs(
+            leftSideContext: leftSideContext,
+            inputs: inputs,
+            inputStyle: inputStyle,
+            cache: self.currentSessionState.zenzaiTypoCache
+        )
+    }
+
     /// 直前のLMベース typo correctionが行った探索量。性能テスト・診断用。
     var latestExperimentalTypoCorrectionMetrics: ZenzaiTypoGenerationMetrics {
         self.currentSessionState.zenzaiTypoCache.lastMetrics

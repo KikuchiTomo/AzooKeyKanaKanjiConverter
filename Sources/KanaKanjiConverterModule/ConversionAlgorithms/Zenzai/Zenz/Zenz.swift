@@ -134,6 +134,26 @@ package final class Zenz {
         }
     }
 
+    func scoreTypoInputs(
+        leftSideContext: String,
+        inputs: [ComposingText],
+        inputStyle: InputStyle,
+        cache: ZenzaiTypoGenerationCache
+    ) -> [Float?] {
+        self.inferenceLock.withLock {
+            guard let zenzContext else {
+                return inputs.map { _ in nil }
+            }
+            return ZenzaiTypoCandidateGenerator.scoreInputs(
+                context: zenzContext,
+                leftSideContext: leftSideContext,
+                inputs: inputs,
+                inputStyle: inputStyle,
+                cache: cache
+            )
+        }
+    }
+
     func generateTypoCandidates(
         leftSideContext: String,
         composingText: ComposingText,

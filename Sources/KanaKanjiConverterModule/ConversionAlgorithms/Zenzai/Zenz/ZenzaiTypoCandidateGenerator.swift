@@ -946,6 +946,35 @@ enum ZenzaiTypoCandidateGenerator {
             .prefix(experimentalConfig.nBest))
     }
 
+    /// 与えた入力(打ち間違いを直した候補など)をそのまま読んだときの言語モデルの点数(対数確率)．入力ごとに返し，読めなければ nil．
+    /// ほかの方法で作った訂正の候補を，文脈を見て比べるために使う
+    static func scoreInputs<Context: ZenzCompatibleInputLanguageModelContext>(
+        context: Context,
+        leftSideContext: String,
+        inputs: [ComposingText],
+        inputStyle: InputStyle,
+        cache: ZenzaiTypoGenerationCache
+    ) -> [Float?] {
+        let mode = Self.resolveGenerationConfig(inputStyle: inputStyle)
+        var scorer = LMScorer(context: context, leftSideContext: leftSideContext, inputStyle: inputStyle, cache: cache, metrics: nil)
+        return inputs.map { composingText in
+            let observedElements = Self.observedElements(composingText: composingText, source: mode.observedSource, keyTopology: mode.keyTopology)
+            guard !observedElements.isEmpty else { return nil }
+            let initial = Hypothesis(
+                correctedInput: "",
+                emittedText: "",
+                emittedLMState: cache.lmRootState,
+                j: 0,
+                prevEmittedChar: nil,
+                score: 0,
+                lmScore: 0,
+                channelCost: 0,
+                generatorState: .init(pending: "", prevInputPiece: nil, proxyLogp: 0)
+            )
+            return Self.completeHypothesis(hypothesis: initial, observedElements: observedElements, table: mode.table, scorer: &scorer)?.lmScore
+        }
+    }
+
     private static func resolveGenerationConfig(inputStyle: InputStyle) -> TypoGenerationConfig {
         switch inputStyle {
         case .roman2kana:
