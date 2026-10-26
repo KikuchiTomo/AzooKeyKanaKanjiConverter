@@ -370,8 +370,12 @@ public final class DicdataStore {
             if !state.dynamicUserDictionary.isEmpty {
                 // 動的ユーザ辞書にデータがある場合、この位置で処理する
                 let katakanaString = String(characters).toKatakana()
-                let dynamicUserDictResult = self.getMatchDynamicUserDict(katakanaString, state: state)
+                let dynamicUserDictResult = state.dynamicUserDictionaryEntries(ruby: katakanaString)
                 updated = updated || !dynamicUserDictResult.isEmpty
+                // 本体の辞書に続きがなくても、動的ユーザ辞書の語の読みの途中であれば探索を打ち切らない
+                if state.isDynamicUserDictionaryRubyPrefix(katakanaString) {
+                    availableMaxIndex = max(availableMaxIndex, characters.endIndex - 1)
+                }
                 for data in dynamicUserDictResult {
                     let depth = characters.endIndex
                     if info.penalty.isZero {
@@ -911,7 +915,7 @@ public final class DicdataStore {
 
     /// 動的ユーザ辞書からrubyに等しい語を返す。
     func getMatchDynamicUserDict(_ ruby: some StringProtocol, state: DicdataStoreState) -> [DicdataElement] {
-        state.dynamicUserDictionary.filter {$0.ruby == ruby}
+        state.dynamicUserDictionaryEntries(ruby: String(ruby))
     }
 
     /// 動的ユーザ辞書からrubyに先頭一致する語を返す。

@@ -8,6 +8,10 @@ package final class DicdataStoreState {
 
     var keyboardLanguage: KeyboardLanguage = .ja_JP
     private(set) var dynamicUserDictionary: [DicdataElement] = []
+    /// `dynamicUserDictionary`を読みで引くための索引
+    private var dynamicUserDictionaryByRuby: [String: [DicdataElement]] = [:]
+    /// `dynamicUserDictionary`の語の読みの、空でないすべての接頭辞
+    private var dynamicUserDictionaryRubyPrefixes: Set<String> = []
     private(set) var dynamicUserShortcuts: [DicdataElement] = []
     var learningMemoryManager: LearningManager
 
@@ -83,10 +87,30 @@ package final class DicdataStoreState {
         self.dynamicUserDictionary.mutatingForEach {
             $0.metadata = .isFromUserDictionary
         }
+        self.dynamicUserDictionaryByRuby = Dictionary(grouping: self.dynamicUserDictionary, by: \.ruby)
+        var prefixes: Set<String> = []
+        for ruby in self.dynamicUserDictionaryByRuby.keys {
+            var prefix = ""
+            for character in ruby {
+                prefix.append(character)
+                prefixes.insert(prefix)
+            }
+        }
+        self.dynamicUserDictionaryRubyPrefixes = prefixes
         self.dynamicUserShortcuts = shortcuts
         self.dynamicUserShortcuts.mutatingForEach {
             $0.metadata = .isFromUserDictionary
         }
+    }
+
+    /// 読みが`ruby`と一致する動的ユーザ辞書の語を返す
+    func dynamicUserDictionaryEntries(ruby: String) -> [DicdataElement] {
+        self.dynamicUserDictionaryByRuby[ruby] ?? []
+    }
+
+    /// `ruby`が動的ユーザ辞書のいずれかの語の読みの接頭辞（読みそのものを含む）であるかを返す
+    func isDynamicUserDictionaryRubyPrefix(_ ruby: String) -> Bool {
+        self.dynamicUserDictionaryRubyPrefixes.contains(ruby)
     }
 
     /// 辞書状態を跨いで変換結果を共有しても安全かを返す。

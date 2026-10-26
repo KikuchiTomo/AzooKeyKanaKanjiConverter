@@ -333,6 +333,31 @@ final class DicdataStoreTests: XCTestCase {
         }
     }
 
+    /// 本体の辞書にない読みの動的ユーザ辞書の語が、読みの途中で区切れる場合にも引けることを確かめる
+    func testDynamicUserDictWordWhoseRubyIsNotInDefaultDictionary() throws {
+        let dicdataStore = DicdataStore.withDefaultDictionary()
+        let state = dicdataStore.prepareState()
+        state.importDynamicUserDictionary([
+            DicdataElement(word: "ピエゾ電気", ruby: "ピエゾデンキ", cid: CIDData.一般名詞.cid, mid: MIDData.一般.mid, value: -5)
+        ])
+        XCTAssertTrue(state.isDynamicUserDictionaryRubyPrefix("ピエゾ"))
+        XCTAssertTrue(state.isDynamicUserDictionaryRubyPrefix("ピエゾデンキ"))
+        XCTAssertFalse(state.isDynamicUserDictionaryRubyPrefix("ピエゾデンキヲ"))
+
+        var c = ComposingText()
+        c.insertAtCursorPosition("ピエゾデンキヲツカウ", inputStyle: .direct)
+        let result = dicdataStore.lookupDicdata(
+            composingText: c,
+            inputRange: (0, nil),
+            surfaceRange: (0, nil),
+            needTypoCorrection: false,
+            state: state
+        )
+        XCTAssertTrue(result.contains(where: {$0.data.word == "ピエゾ電気"}))
+        // 本体の辞書の語も引き続き引ける
+        XCTAssertTrue(result.contains(where: {$0.data.ruby == "ピ"}))
+    }
+
     func testDynamicUserShortcuts() throws {
         let dicdataStore = DicdataStore.withDefaultDictionary()
         let dynamicShortcuts = [
