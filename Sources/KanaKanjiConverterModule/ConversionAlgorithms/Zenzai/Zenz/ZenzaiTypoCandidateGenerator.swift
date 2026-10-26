@@ -245,12 +245,21 @@ private struct KeyTopology: Sendable {
     private let neighborDistancesByCharacter: [Character: [Character: Float]]
     /// 同じキーを続けて2回打ってしまった誤り（チャタリング・押し直し）を、余分な1打として扱うときの距離。nilなら扱わない。
     let repeatedKeyDistance: Float?
+    /// ローマ字で余分に入った母音（tutuTa → tutta）を、隣のキーでなくても余分な1打として扱うときの距離。nilなら扱わない。
+    let extraVowelDistance: Float?
+    /// 打ち忘れたかもしれない文字（母音と、直前と同じ文字）を補うときの手間。nilなら打ち忘れを扱わない。
+    let omissionCost: Float?
 
-    init(id: ID, neighborDistancesByCharacter: [Character: [Character: Float]], repeatedKeyDistance: Float? = nil) {
+    init(id: ID, neighborDistancesByCharacter: [Character: [Character: Float]], repeatedKeyDistance: Float? = nil,
+         extraVowelDistance: Float? = nil, omissionCost: Float? = nil) {
         self.id = id
         self.neighborDistancesByCharacter = neighborDistancesByCharacter
         self.repeatedKeyDistance = repeatedKeyDistance
+        self.extraVowelDistance = extraVowelDistance
+        self.omissionCost = omissionCost
     }
+
+    static let romajiVowels: Set<Character> = ["a", "i", "u", "e", "o"]
 
     func neighborDistances(around character: Character) -> [Character: Float] {
         self.neighborDistancesByCharacter[character, default: [:]]
@@ -280,7 +289,9 @@ private struct KeyTopology: Sendable {
                 "z": (0.80, 3), "x": (1.80, 3), "c": (2.80, 3), "v": (3.80, 3), "b": (4.80, 3), "n": (5.80, 3), "m": (6.80, 3), ",": (7.80, 3), ".": (8.80, 3), "/": (9.80, 3), "_": (10.80, 3),
             ]
         ), distance: 1.5),
-        repeatedKeyDistance: 0.7
+        repeatedKeyDistance: 0.7,
+        extraVowelDistance: 1.2,
+        omissionCost: 3.0
     )
 
     /// iOSのフルキーボード配置を基にしたQWERTY近傍座標。単位距離はキー間隔1つ分。Macと比べて横幅が狭く、縦幅が広い。
@@ -1148,7 +1159,8 @@ enum ZenzaiTypoCandidateGenerator {
         if !isInputTail,
            let prevInput = baseState.prevInputPiece,
            let insertionDistance = Self.neighborDistances(for: prevInput, topology: keyTopology)[observed]
-            ?? (Self.canonicalCharacter(for: prevInput) == observed ? keyTopology.repeatedKeyDistance : nil) {
+            ?? (Self.canonicalCharacter(for: prevInput) == observed ? keyTopology.repeatedKeyDistance : nil)
+            ?? (KeyTopology.romajiVowels.contains(observed) ? keyTopology.extraVowelDistance : nil) {
             let newProxyLogp = Self.pendingProxyLogProb(
                 pending: baseState.pending,
                 emittedLMState: hypothesis.emittedLMState,
@@ -1165,6 +1177,20 @@ enum ZenzaiTypoCandidateGenerator {
                 insertedState.proxyLogp = newProxyLogp
                 inserted.generatorState = insertedState
                 immediate.append(inserted)
+            }
+        }
+
+        // 打ち忘れ: 観測した文字の前に，打ち忘れたかもしれない文字（母音と，直前と同じ文字）を補う
+        if let omissionCost = keyTopology.omissionCost {
+            var missing = KeyTopology.romajiVowels
+            if let prev = baseState.prevInputPiece.flatMap(Self.canonicalCharacter(for:)) { missing.insert(prev) }
+            for character in missing.sorted() {
+                addAdvance(
+                    trueSeq: [character, observed],
+                    observedCount: 1,
+                    channelAdd: omissionCost,
+                    lastInputPiece: observedElement.inputPiece
+                )
             }
         }
 
