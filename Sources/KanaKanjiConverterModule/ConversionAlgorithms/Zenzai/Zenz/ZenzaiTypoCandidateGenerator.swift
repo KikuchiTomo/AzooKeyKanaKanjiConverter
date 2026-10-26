@@ -243,22 +243,44 @@ private struct KeyTopology: Sendable {
 
     let id: ID
     private let neighborDistancesByCharacter: [Character: [Character: Float]]
+    /// 同じキーを続けて2回打ってしまった誤り（チャタリング・押し直し）を、余分な1打として扱うときの距離。nilなら扱わない。
+    let repeatedKeyDistance: Float?
+
+    init(id: ID, neighborDistancesByCharacter: [Character: [Character: Float]], repeatedKeyDistance: Float? = nil) {
+        self.id = id
+        self.neighborDistancesByCharacter = neighborDistancesByCharacter
+        self.repeatedKeyDistance = repeatedKeyDistance
+    }
 
     func neighborDistances(around character: Character) -> [Character: Float] {
         self.neighborDistancesByCharacter[character, default: [:]]
     }
 
+    /// ローマ字入力では、キーが離れていても母音どうしを取り違えやすい（onegai → onagai）。
+    /// 母音どうしを、まだ近傍でなければ distance の近傍として加える。
+    private static func addingVowelConfusion(to distances: [Character: [Character: Float]], distance: Float) -> [Character: [Character: Float]] {
+        var result = distances
+        let vowels: [Character] = ["a", "i", "u", "e", "o"]
+        for source in vowels {
+            for target in vowels where target != source && result[source]?[target] == nil {
+                result[source, default: [:]][target] = distance
+            }
+        }
+        return result
+    }
+
     /// magic keyboardの配置を基にしたQWERTY近傍座標。単位距離はキー間隔1つ分。
     static let macOSStandardQwerty = KeyTopology(
         id: .macOSStandardQwerty,
-        neighborDistancesByCharacter: Self.buildCoordinateNeighborDistances(
+        neighborDistancesByCharacter: Self.addingVowelConfusion(to: Self.buildCoordinateNeighborDistances(
             coordinates: [
                 "1": (-1.0, 0), "2": (0.25, 0), "3": (1.25, 0), "4": (2.25, 0), "5": (3.25, 0), "6": (4.25, 0), "7": (5.25, 0), "8": (6.25, 0), "9": (7.25, 0), "0": (8.25, 0), "-": (9.25, 0), "^": (10.25, 0),
                 "q": (0.00, 1), "w": (1.00, 1), "e": (2.00, 1), "r": (3.00, 1), "t": (4.00, 1), "y": (5.00, 1), "u": (6.00, 1), "i": (7.00, 1), "o": (8.00, 1), "p": (9.00, 1), "@": (10.00, 1), "[": (11.00, 1),
                 "a": (0.25, 2), "s": (1.25, 2), "d": (2.25, 2), "f": (3.25, 2), "g": (4.25, 2), "h": (5.25, 2), "j": (6.25, 2), "k": (7.25, 2), "l": (8.25, 2), ";": (9.25, 2), "]": (10.25, 2),
                 "z": (0.80, 3), "x": (1.80, 3), "c": (2.80, 3), "v": (3.80, 3), "b": (4.80, 3), "n": (5.80, 3), "m": (6.80, 3), ",": (7.80, 3), ".": (8.80, 3), "/": (9.80, 3), "_": (10.80, 3),
             ]
-        )
+        ), distance: 1.5),
+        repeatedKeyDistance: 0.7
     )
 
     /// iOSのフルキーボード配置を基にしたQWERTY近傍座標。単位距離はキー間隔1つ分。Macと比べて横幅が狭く、縦幅が広い。
@@ -1125,7 +1147,8 @@ enum ZenzaiTypoCandidateGenerator {
 
         if !isInputTail,
            let prevInput = baseState.prevInputPiece,
-           let insertionDistance = Self.neighborDistances(for: prevInput, topology: keyTopology)[observed] {
+           let insertionDistance = Self.neighborDistances(for: prevInput, topology: keyTopology)[observed]
+            ?? (Self.canonicalCharacter(for: prevInput) == observed ? keyTopology.repeatedKeyDistance : nil) {
             let newProxyLogp = Self.pendingProxyLogProb(
                 pending: baseState.pending,
                 emittedLMState: hypothesis.emittedLMState,
