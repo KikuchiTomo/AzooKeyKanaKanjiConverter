@@ -110,4 +110,87 @@ final class ZenzaiTypoIncrementalTests: XCTestCase {
             }
         }
     }
+
+    /// 打ち足した数が 1 文字でないときも，別の入力・別の左文脈と交互に探しても，checkpoint から再開した結果が全体の探索と同じになる
+    func testCheckpointsResumeAcrossPrefixesInputsAndPromptsExactly() {
+        let context = DeterministicCharacterContext()
+        let config = ExperimentalTypoCorrectionConfig(languageModel: .zenz, beamSize: 8, topK: 16, nBest: 5)
+        var fullConfig = config
+        fullConfig.usesIncrementalCheckpoint = false
+        let cache = ZenzaiTypoGenerationCache()
+        // (左文脈, 入力)．同じ入力の続きを飛び飛びに，ほかの入力と左文脈をはさんで探す
+        let requests: [(String, String)] = [
+            ("一致検証", "konobu"),
+            ("", "konobu"),
+            ("一致検証", "kyouhaii"),
+            ("一致検証", "konobunsh"),
+            ("", "konobunshou"),
+            ("一致検証", "konobunshou"),
+            ("一致検証", "konobunshou"),
+            ("一致検証", "kyouhaiitenki"),
+            ("別の文脈", "konobunshouwo"),
+        ]
+        for (leftContext, input) in requests {
+            var composingText = ComposingText()
+            composingText.insertAtCursorPosition(input, inputStyle: .roman2kana)
+            let resumed = ZenzaiTypoCandidateGenerator.generate(
+                context: context, leftSideContext: leftContext, composingText: composingText,
+                inputStyle: .roman2kana, experimentalConfig: config, cache: cache
+            )
+            let full = ZenzaiTypoCandidateGenerator.generate(
+                context: context, leftSideContext: leftContext, composingText: composingText,
+                inputStyle: .roman2kana, experimentalConfig: fullConfig, cache: ZenzaiTypoGenerationCache()
+            )
+            self.assertEquivalentCandidateRanking(resumed, full, message: "resumed search diverged for context=\(leftContext), input=\(input)")
+        }
+    }
+
+    /// 前に探した入力の続きを探すとき，checkpoint から再開して LM の評価を減らす
+    func testCheckpointIsReusedForLongerInput() {
+        let context = DeterministicCharacterContext()
+        var config = ExperimentalTypoCorrectionConfig(languageModel: .zenz, beamSize: 8, topK: 16, nBest: 5)
+        config.collectsPerformanceMetrics = true
+        func steps(_ input: String, cache: ZenzaiTypoGenerationCache) -> Int {
+            var composingText = ComposingText()
+            composingText.insertAtCursorPosition(input, inputStyle: .roman2kana)
+            _ = ZenzaiTypoCandidateGenerator.generate(
+                context: context, leftSideContext: "一致検証", composingText: composingText,
+                inputStyle: .roman2kana, experimentalConfig: config, cache: cache
+            )
+            return cache.lastMetrics.stepCount
+        }
+        let warmed = ZenzaiTypoGenerationCache()
+        _ = steps("konobunsh", cache: warmed)
+        _ = steps("", cache: warmed)
+        XCTAssertLessThan(steps("konobunshouwo", cache: warmed), steps("konobunshouwo", cache: ZenzaiTypoGenerationCache()))
+    }
+
+    /// 途中で取り消した探索の checkpoint から再開しても，全体の探索と同じ結果になる
+    func testStoppedSearchResumesExactly() {
+        let context = DeterministicCharacterContext()
+        let config = ExperimentalTypoCorrectionConfig(languageModel: .zenz, beamSize: 8, topK: 16, nBest: 5)
+        var fullConfig = config
+        fullConfig.usesIncrementalCheckpoint = false
+        var composingText = ComposingText()
+        composingText.insertAtCursorPosition("konobunshouwo", inputStyle: .roman2kana)
+        for stopAfter in [1, 3, 6, 10] {
+            let cache = ZenzaiTypoGenerationCache()
+            var calls = 0
+            let stopped = ZenzaiTypoCandidateGenerator.generate(
+                context: context, leftSideContext: "一致検証", composingText: composingText,
+                inputStyle: .roman2kana, experimentalConfig: config, cache: cache,
+                shouldStop: { calls += 1; return calls > stopAfter }
+            )
+            XCTAssertTrue(stopped.isEmpty)
+            let resumed = ZenzaiTypoCandidateGenerator.generate(
+                context: context, leftSideContext: "一致検証", composingText: composingText,
+                inputStyle: .roman2kana, experimentalConfig: config, cache: cache
+            )
+            let full = ZenzaiTypoCandidateGenerator.generate(
+                context: context, leftSideContext: "一致検証", composingText: composingText,
+                inputStyle: .roman2kana, experimentalConfig: fullConfig, cache: ZenzaiTypoGenerationCache()
+            )
+            self.assertEquivalentCandidateRanking(resumed, full, message: "resumed after stop \(stopAfter)")
+        }
+    }
 }

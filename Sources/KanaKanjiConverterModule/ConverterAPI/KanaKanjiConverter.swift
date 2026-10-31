@@ -28,7 +28,6 @@ public final class KanaKanjiConverter {
         var lattice: Lattice = .init()
         var completedData: Candidate?
         var zenzaiCache: Kana2Kanji.ZenzaiCache?
-        var zenzaiTypoCache: ZenzaiTypoGenerationCache = .init()
         var ngramCache: NGramCache = .init()
         var predictiveInputCache: PredictiveInputCacheEntry?
         var stablePredictionCandidateCache: StablePredictionCandidateCacheEntry?
@@ -69,6 +68,9 @@ public final class KanaKanjiConverter {
     /// 完全な入力・文脈・制約をキーにする純粋なメモ化結果。
     /// compositionではなく、このConverterインスタンスの寿命に紐づける。
     var zenzaiMemoizationCache = ZenzaiMemoizationCache()
+    /// typo 探索の LM 補助キャッシュ。入力・プロンプト・モデルから決まる純粋なメモ化なので、
+    /// composition の終了では捨てず、このConverterインスタンスの寿命に紐づける。
+    private let zenzaiTypoCache = ZenzaiTypoGenerationCache()
     private var zenzaiPersonalization: (mode: ConvertRequestOptions.ZenzaiMode.PersonalizationMode, base: EfficientNGram, personal: EfficientNGram)?
     public private(set) var zenzStatus: String = ""
     private var dicdataStoreState: DicdataStoreState
@@ -152,6 +154,7 @@ public final class KanaKanjiConverter {
     /// compositionを終了せずに再計算可能なキャッシュだけを解放したい場合に利用します。
     public func purgeZenzaiMemoizationCache() {
         self.zenzaiMemoizationCache = .init()
+        self.zenzaiTypoCache.invalidateAll()
     }
 
     private func getZenzaiPersonalization(mode: ConvertRequestOptions.ZenzaiMode.PersonalizationMode?) -> (mode: ConvertRequestOptions.ZenzaiMode.PersonalizationMode, base: EfficientNGram, personal: EfficientNGram)? {
@@ -266,11 +269,6 @@ public final class KanaKanjiConverter {
             do {
                 self.zenz = try Zenz.shared(resourceURL: modelURL)
                 self.purgeZenzaiMemoizationCache()
-                self.sessions = self.sessions.mapValues { state in
-                    let next = state
-                    next.zenzaiTypoCache.invalidateForModelChange()
-                    return next
-                }
                 self.zenzStatus = "load \(modelURL.absoluteString)"
                 return self.zenz
             } catch {
@@ -353,7 +351,8 @@ public final class KanaKanjiConverter {
         composingText: ComposingText,
         options: ConvertRequestOptions,
         inputStyle: InputStyle,
-        config: ExperimentalTypoCorrectionConfig = .init()
+        config: ExperimentalTypoCorrectionConfig = .init(),
+        shouldStop: () -> Bool = { false }
     ) -> [ZenzaiTypoCandidate] {
         debug("[Warning] KanaKanjiConverter.experimentalRequestTypoCorrection is experimental and may change without notice.")
         switch config.languageModel {
@@ -371,7 +370,8 @@ public final class KanaKanjiConverter {
                 composingText: composingText,
                 inputStyle: inputStyle,
                 experimentalConfig: config,
-                cache: self.currentSessionState.zenzaiTypoCache
+                cache: self.zenzaiTypoCache,
+                shouldStop: shouldStop
             )
         case .ngram:
             guard let context = ZenzaiTypoCandidateGenerator.resolveNGramContext(
@@ -386,7 +386,8 @@ public final class KanaKanjiConverter {
                 composingText: composingText,
                 inputStyle: inputStyle,
                 experimentalConfig: config,
-                cache: self.currentSessionState.zenzaiTypoCache
+                cache: self.zenzaiTypoCache,
+                shouldStop: shouldStop
             )
         }
     }
@@ -397,7 +398,8 @@ public final class KanaKanjiConverter {
         leftSideContext: String,
         inputs: [ComposingText],
         options: ConvertRequestOptions,
-        inputStyle: InputStyle
+        inputStyle: InputStyle,
+        shouldStop: () -> Bool = { false }
     ) -> [Float?] {
         guard options.zenzaiMode.enabled, let zenz = self.getModel(modelURL: options.zenzaiMode.weightURL) else {
             return inputs.map { _ in nil }
@@ -406,13 +408,14 @@ public final class KanaKanjiConverter {
             leftSideContext: leftSideContext,
             inputs: inputs,
             inputStyle: inputStyle,
-            cache: self.currentSessionState.zenzaiTypoCache
+            cache: self.zenzaiTypoCache,
+            shouldStop: shouldStop
         )
     }
 
     /// 直前のLMベース typo correctionが行った探索量。性能テスト・診断用。
     var latestExperimentalTypoCorrectionMetrics: ZenzaiTypoGenerationMetrics {
-        self.currentSessionState.zenzaiTypoCache.lastMetrics
+        self.zenzaiTypoCache.lastMetrics
     }
 
     /// 入力する言語が分かったらこの関数をなるべく早い段階で呼ぶことで、SpellCheckerの初期化が行われ、変換がスムーズになる

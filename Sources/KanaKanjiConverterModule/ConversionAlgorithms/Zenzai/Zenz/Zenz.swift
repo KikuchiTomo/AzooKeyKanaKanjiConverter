@@ -138,7 +138,8 @@ package final class Zenz {
         leftSideContext: String,
         inputs: [ComposingText],
         inputStyle: InputStyle,
-        cache: ZenzaiTypoGenerationCache
+        cache: ZenzaiTypoGenerationCache,
+        shouldStop: () -> Bool
     ) -> [Float?] {
         self.inferenceLock.withLock {
             guard let zenzContext else {
@@ -149,7 +150,8 @@ package final class Zenz {
                 leftSideContext: leftSideContext,
                 inputs: inputs,
                 inputStyle: inputStyle,
-                cache: cache
+                cache: cache,
+                shouldStop: shouldStop
             )
         }
     }
@@ -159,7 +161,8 @@ package final class Zenz {
         composingText: ComposingText,
         inputStyle: InputStyle,
         experimentalConfig: ExperimentalTypoCorrectionConfig,
-        cache: ZenzaiTypoGenerationCache
+        cache: ZenzaiTypoGenerationCache,
+        shouldStop: () -> Bool
     ) -> [ZenzaiTypoCandidate] {
         self.inferenceLock.withLock {
             guard let zenzContext else {
@@ -171,7 +174,8 @@ package final class Zenz {
                 composingText: composingText,
                 inputStyle: inputStyle,
                 experimentalConfig: experimentalConfig,
-                cache: cache
+                cache: cache,
+                shouldStop: shouldStop
             )
         }
     }

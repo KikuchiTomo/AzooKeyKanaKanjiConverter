@@ -179,13 +179,33 @@ private struct ZenzaiTypoIncrementalCheckpoint {
     var completedStepCount: Int
 }
 
-/// セッション跨ぎで typo 探索のLM補助キャッシュを保持するコンテナ。
+/// 1つのプロンプト(左文脈)に対する LM の状態の木と増分 checkpoint。
+private final class ZenzaiTypoPromptState {
+    init(promptTokenIDs: [Int]) {
+        self.promptTokenIDs = promptTokenIDs
+    }
+
+    let promptTokenIDs: [Int]
+    var lmRootState = ZenzaiTypoLMState(emittedTokenIDs: [])
+    var lmCachedDistributionCount = 0
+    /// 新しいものほど後ろ。入力の並びごとに1つ
+    var incrementalCheckpoints: [ZenzaiTypoIncrementalCheckpoint] = []
+}
+
+/// typo 探索のLM補助キャッシュを保持するコンテナ。
+///
+/// 中身はすべて入力・プロンプト・モデルから決まる純粋なメモ化なので、composition の終了(`stopComposition`)では捨てず、
+/// Converter の寿命に紐づける。左文脈を付けた探索と付けない採点を交互に行っても作り直さないよう、プロンプトごとに持つ。
 final class ZenzaiTypoGenerationCache {
-    fileprivate var prompt: String = ""
-    fileprivate var promptTokenIDs: [Int] = []
+    /// 同時に保持するプロンプトの数
+    static let maxPromptStateCount = 4
+    /// 1つのプロンプトで保持する次トークン分布の数の上限。超えたら状態の木を作り直す(メモリを増やし続けない)
+    static let maxCachedDistributionCountPerPrompt = 8_192
+    /// 1つのプロンプトで保持する増分 checkpoint の数(打ったまま・綴り直し・重なりを1回にした並びなどを並行して探すため)
+    static let maxIncrementalCheckpointCount = 8
+
+    fileprivate private(set) var prompt: String = ""
     fileprivate var vocabSize: Int = 0
-    fileprivate var lmRootState = ZenzaiTypoLMState(emittedTokenIDs: [])
-    fileprivate var lmCachedDistributionCount = 0
     fileprivate var encodeCache: [String: [Int]] = [:]
     fileprivate var tokenCharCache: [Int: Character?] = [:]
     fileprivate var cachedInputStyle: InputStyle?
@@ -193,15 +213,93 @@ final class ZenzaiTypoGenerationCache {
     fileprivate var pendingFirstTokenIDsCache: [String: [Int]] = [:]
     fileprivate var finiteHistoryCacheNamespace: String?
     fileprivate var finiteHistoryDistributions: [[Int]: ZenzaiTypoLMDistribution] = [:]
-    fileprivate var incrementalCheckpoint: ZenzaiTypoIncrementalCheckpoint?
+    private var promptStates: OrderedDictionary<String, ZenzaiTypoPromptState> = [:]
     var lastMetrics = ZenzaiTypoGenerationMetrics()
+
+    private var current: ZenzaiTypoPromptState? {
+        self.promptStates[self.prompt]
+    }
+
+    fileprivate var promptTokenIDs: [Int] {
+        self.current?.promptTokenIDs ?? []
+    }
+
+    fileprivate var lmRootState: ZenzaiTypoLMState {
+        self.current?.lmRootState ?? ZenzaiTypoLMState(emittedTokenIDs: [])
+    }
+
+    fileprivate var lmCachedDistributionCount: Int {
+        self.current?.lmCachedDistributionCount ?? 0
+    }
+
+    /// プロンプトを選ぶ。前に使ったプロンプトなら状態の木と checkpoint をそのまま使う
+    fileprivate func selectPrompt(_ prompt: String, encode: (String) -> [Int]) {
+        self.prompt = prompt
+        if let state = self.promptStates.removeValue(forKey: prompt), !state.promptTokenIDs.isEmpty {
+            self.promptStates[prompt] = state
+        } else {
+            self.promptStates[prompt] = ZenzaiTypoPromptState(promptTokenIDs: encode(prompt))
+        }
+        while self.promptStates.count > Self.maxPromptStateCount {
+            self.promptStates.removeFirst()
+        }
+        if let current, current.lmCachedDistributionCount > Self.maxCachedDistributionCountPerPrompt {
+            current.lmRootState = ZenzaiTypoLMState(emittedTokenIDs: [])
+            current.lmCachedDistributionCount = 0
+            current.incrementalCheckpoints = []
+        }
+    }
+
+    fileprivate func didCacheDistribution() {
+        self.current?.lmCachedDistributionCount += 1
+    }
+
+    /// 今の入力の探索を途中から始められる checkpoint のうち，最も進んだもの。
+    /// checkpoint は，保存した入力の末尾2文字に触れる前の beam なので，その入力を先頭に含む入力(同じ入力を含む)なら同じ探索になる
+    fileprivate func incrementalCheckpoint(
+        inputStyle: InputStyle,
+        config: ExperimentalTypoCorrectionConfig,
+        observedInputPieces: [InputPiece],
+        observedCharacters: [Character]
+    ) -> ZenzaiTypoIncrementalCheckpoint? {
+        self.current?.incrementalCheckpoints
+            .filter {
+                $0.prompt == self.prompt
+                    && $0.inputStyle == inputStyle
+                    && $0.config == config
+                    && $0.observedInputPieces.count <= observedInputPieces.count
+                    && observedInputPieces.starts(with: $0.observedInputPieces)
+                    && observedCharacters.starts(with: $0.observedCharacters)
+            }
+            .max { $0.completedStepCount < $1.completedStepCount }
+    }
+
+    fileprivate func storeIncrementalCheckpoint(_ checkpoint: ZenzaiTypoIncrementalCheckpoint) {
+        guard let current else {
+            return
+        }
+        current.incrementalCheckpoints.removeAll {
+            $0.inputStyle == checkpoint.inputStyle
+                && $0.config == checkpoint.config
+                && $0.observedInputPieces == checkpoint.observedInputPieces
+                && $0.observedCharacters == checkpoint.observedCharacters
+        }
+        current.incrementalCheckpoints.append(checkpoint)
+        if current.incrementalCheckpoints.count > Self.maxIncrementalCheckpointCount {
+            current.incrementalCheckpoints.removeFirst(current.incrementalCheckpoints.count - Self.maxIncrementalCheckpointCount)
+        }
+    }
+
+    fileprivate func clearIncrementalCheckpoints() {
+        for state in self.promptStates.values {
+            state.incrementalCheckpoints = []
+        }
+    }
 
     func invalidateAll() {
         self.prompt = ""
-        self.promptTokenIDs = []
         self.vocabSize = 0
-        self.lmRootState = ZenzaiTypoLMState(emittedTokenIDs: [])
-        self.lmCachedDistributionCount = 0
+        self.promptStates = [:]
         self.encodeCache = [:]
         self.tokenCharCache = [:]
         self.cachedInputStyle = nil
@@ -209,18 +307,16 @@ final class ZenzaiTypoGenerationCache {
         self.pendingFirstTokenIDsCache = [:]
         self.finiteHistoryCacheNamespace = nil
         self.finiteHistoryDistributions = [:]
-        self.incrementalCheckpoint = nil
     }
 
     func invalidateForModelChange() {
-        self.lmRootState = ZenzaiTypoLMState(emittedTokenIDs: [])
-        self.lmCachedDistributionCount = 0
+        self.prompt = ""
+        self.promptStates = [:]
         self.encodeCache = [:]
         self.tokenCharCache = [:]
         self.pendingFirstTokenIDsCache = [:]
         self.finiteHistoryCacheNamespace = nil
         self.finiteHistoryDistributions = [:]
-        self.incrementalCheckpoint = nil
     }
 }
 
@@ -510,7 +606,7 @@ enum ZenzaiTypoCandidateGenerator {
             self.cache.cachedInputStyle = inputStyle
             self.cache.inputTransitionCache = [:]
             self.cache.pendingFirstTokenIDsCache = [:]
-            self.cache.incrementalCheckpoint = nil
+            self.cache.clearIncrementalCheckpoints()
         }
 
         private func preparePrompt(leftSideContext: String) {
@@ -520,13 +616,7 @@ enum ZenzaiTypoCandidateGenerator {
             }
             self.cache.vocabSize = vocabSize
             let prompt = ZenzPromptBuilder.typoCorrectionPromptPrefix(leftSideContext: leftSideContext)
-            if self.cache.prompt != prompt || self.cache.promptTokenIDs.isEmpty {
-                self.cache.prompt = prompt
-                self.cache.promptTokenIDs = self.context.encodeRaw(prompt)
-                self.cache.lmRootState = ZenzaiTypoLMState(emittedTokenIDs: [])
-                self.cache.lmCachedDistributionCount = 0
-                self.cache.incrementalCheckpoint = nil
-            }
+            self.cache.selectPrompt(prompt, encode: self.context.encodeRaw)
         }
 
         mutating func encodeRaw(_ text: String) -> [Int] {
@@ -681,7 +771,7 @@ enum ZenzaiTypoCandidateGenerator {
             if let finiteHistoryKey {
                 self.cache.finiteHistoryDistributions[finiteHistoryKey] = distribution
             }
-            self.cache.lmCachedDistributionCount += 1
+            self.cache.didCacheDistribution()
             return values
         }
     }
@@ -776,7 +866,8 @@ enum ZenzaiTypoCandidateGenerator {
         composingText: ComposingText,
         inputStyle: InputStyle,
         experimentalConfig: ExperimentalTypoCorrectionConfig,
-        cache: ZenzaiTypoGenerationCache
+        cache: ZenzaiTypoGenerationCache,
+        shouldStop: () -> Bool = { false }
     ) -> [ZenzaiTypoCandidate] {
         let metrics = experimentalConfig.collectsPerformanceMetrics ? MetricsRecorder() : nil
         cache.lastMetrics = .init()
@@ -825,17 +916,13 @@ enum ZenzaiTypoCandidateGenerator {
         )
         let observedInputPieces = observedElements.map(\.inputPiece)
         let observedCharacters = observedElements.map(\.character)
-        let previousInputPieces = Array(observedInputPieces.dropLast())
-        let previousCharacters = Array(observedCharacters.dropLast())
-        let resumeCheckpoint: IncrementalCheckpoint? = if
-            let checkpoint = cache.incrementalCheckpoint,
-            experimentalConfig.usesIncrementalCheckpoint,
-            checkpoint.prompt == cache.prompt,
-            checkpoint.inputStyle == inputStyle,
-            checkpoint.config == experimentalConfig,
-            checkpoint.observedInputPieces == previousInputPieces,
-            checkpoint.observedCharacters == previousCharacters {
-            checkpoint
+        let resumeCheckpoint: IncrementalCheckpoint? = if experimentalConfig.usesIncrementalCheckpoint {
+            cache.incrementalCheckpoint(
+                inputStyle: inputStyle,
+                config: experimentalConfig,
+                observedInputPieces: observedInputPieces,
+                observedCharacters: observedCharacters
+            )
         } else {
             nil
         }
@@ -845,7 +932,14 @@ enum ZenzaiTypoCandidateGenerator {
         metrics?.value.peakBeamSize = beam.count
 
         while completedStepCount < maxSteps {
-            // 1文字追加後も探索が同一である範囲だけを保存する。observedCountは最大2なので、
+            // 呼んだ側が取り消したら探索をやめる。そこまでの checkpoint は保存するので、次に同じ入力やその続きを探すときに使える
+            if shouldStop() {
+                if let nextCheckpoint {
+                    cache.storeIncrementalCheckpoint(nextCheckpoint)
+                }
+                return []
+            }
+            // 入力を後ろに足しても探索が同一である範囲だけを保存する。observedCountは最大2なので、
             // current tailの2文字前へ到達する前ならisInputTail/reachesTailの分岐に触れない。
             if experimentalConfig.usesIncrementalCheckpoint,
                observedElements.count >= 3,
@@ -885,7 +979,9 @@ enum ZenzaiTypoCandidateGenerator {
                 break
             }
         }
-        cache.incrementalCheckpoint = nextCheckpoint
+        if let nextCheckpoint {
+            cache.storeIncrementalCheckpoint(nextCheckpoint)
+        }
 
         let finals: [Hypothesis] = {
             let consumed = beam.filter { $0.j == observedElements.count }
@@ -953,11 +1049,14 @@ enum ZenzaiTypoCandidateGenerator {
         leftSideContext: String,
         inputs: [ComposingText],
         inputStyle: InputStyle,
-        cache: ZenzaiTypoGenerationCache
+        cache: ZenzaiTypoGenerationCache,
+        shouldStop: () -> Bool = { false }
     ) -> [Float?] {
         let mode = Self.resolveGenerationConfig(inputStyle: inputStyle)
         var scorer = LMScorer(context: context, leftSideContext: leftSideContext, inputStyle: inputStyle, cache: cache, metrics: nil)
         return inputs.map { composingText in
+            // 取り消されたら残りは採点しない
+            guard !shouldStop() else { return nil }
             let observedElements = Self.observedElements(composingText: composingText, source: mode.observedSource, keyTopology: mode.keyTopology)
             guard !observedElements.isEmpty else { return nil }
             let initial = Hypothesis(
