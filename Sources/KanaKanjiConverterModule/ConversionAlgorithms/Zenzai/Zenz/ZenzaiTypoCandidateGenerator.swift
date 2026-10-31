@@ -197,10 +197,11 @@ private final class ZenzaiTypoPromptState {
 /// 中身はすべて入力・プロンプト・モデルから決まる純粋なメモ化なので、composition の終了(`stopComposition`)では捨てず、
 /// Converter の寿命に紐づける。左文脈を付けた探索と付けない採点を交互に行っても作り直さないよう、プロンプトごとに持つ。
 final class ZenzaiTypoGenerationCache {
-    /// 同時に保持するプロンプトの数
-    static let maxPromptStateCount = 4
-    /// 1つのプロンプトで保持する次トークン分布の数の上限。超えたら状態の木を作り直す(メモリを増やし続けない)
-    static let maxCachedDistributionCountPerPrompt = 8_192
+    /// 同時に保持するプロンプトの数(左文脈を付けた探索と、付けない採点)
+    static let maxPromptStateCount = 2
+    /// 1つのプロンプトで保持する次トークン分布の数の上限。超えたら次の探索の前に状態の木を作り直す(メモリを増やし続けない)。
+    /// 分布1つは語彙の数の Float(zenz-v3 の 6000 語で 24KB)なので、2048 で 1 プロンプトあたり約 50MB
+    static let maxCachedDistributionCountPerPrompt = 2_048
     /// 1つのプロンプトで保持する増分 checkpoint の数(打ったまま・綴り直し・重なりを1回にした並びなどを並行して探すため)
     static let maxIncrementalCheckpointCount = 8
 
