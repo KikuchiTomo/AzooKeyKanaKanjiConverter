@@ -349,6 +349,12 @@ final class ZenzContext {
     private let n_len: Int32 = 512
     private let evalSeqId: llama_seq_id = 0
     private let inputPredictionSeqId: llama_seq_id = 1
+    /// 検証木の候補に割り当てる系列 ID の始まり。評価と入力予測の系列(0・1)とは分ける
+    private let candidateTreeFirstSeqId: llama_seq_id = 2
+    /// 検証木を評価するバッチ。1 つのトークンに候補の数だけ系列 ID を付けるので，評価のバッチとは別に持つ(初めて使うときに作る)
+    private var candidateTreeBatch: llama_batch?
+    /// 検証木で 1 回に評価する候補の数の上限(系列 ID の数)。バッチの大きさを決めるので固定する
+    static let candidateTreeMaximumCandidates = 32
 
     private init(sharedModel: SharedZenzModel, context: OpaquePointer) {
         self.sharedModel = sharedModel
@@ -358,6 +364,9 @@ final class ZenzContext {
 
     deinit {
         llama_batch_free(self.batch)
+        if let candidateTreeBatch {
+            llama_batch_free(candidateTreeBatch)
+        }
         llama_free(context)
     }
 
@@ -517,6 +526,116 @@ final class ZenzContext {
         self.prevInputBySeq[seqId] = tokens
         return llama_get_logits(context)
     }
+
+    /// 候補のトークン列を検証木にまとめ，1 回の `llama_decode` で全候補の log P(候補, 出力の終わり | プロンプト) を求める。
+    ///
+    /// プロンプトの最後のトークンを除いた部分は評価の系列(0)の KV を使い回し，候補ごとの系列(2 から)に写す。
+    /// 木の節はすべてロジットを出し，候補のトークンごとの対数確率と，最後の節での「出力の終わり」の対数確率を足す。
+    /// 評価のあとで候補の系列の KV は消す。評価の系列の KV は，前の評価と食い違う部分だけをプロンプトに置き換える(食い違った続きは次の評価で求め直される)。
+    /// KV に空きが無いときは推論せず，すべて nil を返す。
+    /// - Returns: 候補ごとの点数(木に入りきらなかった候補と，推論に失敗したときは nil)と，評価したトークンの数(根を含む木の節の数)
+    func scoreCandidateTree(
+        promptTokens: [llama_token],
+        candidates: [[llama_token]],
+        maximumNodes: Int,
+        maximumCandidates: Int
+    ) -> (scores: [Float?], evaluatedTokens: Int) {
+        let failure = (scores: candidates.map { _ -> Float? in nil }, evaluatedTokens: 0)
+        guard let rootToken = promptTokens.last else {
+            return failure
+        }
+        let head = Array(promptTokens.dropLast())
+        let nodeLimit = min(maximumNodes, Int(self.n_len) - head.count)
+        let tree = ZenzCandidateTree(
+            rootToken: rootToken,
+            candidates: candidates,
+            maximumNodes: nodeLimit,
+            maximumCandidates: min(maximumCandidates, Self.candidateTreeMaximumCandidates)
+        )
+        guard tree.acceptedCount > 0 else {
+            return failure
+        }
+
+        // 1. プロンプトの最後を除いた部分を評価の系列に置く(前の評価と共通の先頭は使い回す)
+        let previous = self.prevInputBySeq[evalSeqId] ?? []
+        let common = previous.commonPrefix(with: head).count
+        if common < head.count {
+            llama_kv_cache_seq_rm(context, evalSeqId, llama_pos(common), -1)
+            self.prevInputBySeq[evalSeqId] = Array(head.prefix(common))
+            self.batch.n_tokens = 0
+            for i in common ..< head.count {
+                llama_batch_add(&self.batch, head[i], Int32(i), [evalSeqId], logits: false)
+            }
+            if llama_decode(context, self.batch) != 0 {
+                debug("llama_decode() failed while placing the prompt of the candidate tree")
+                return failure
+            }
+            self.prevInputBySeq[evalSeqId] = head
+        }
+
+        // 2. 候補ごとの系列にプロンプトを写す(KV を足さずにセルに系列 ID を足すだけ)
+        let seqIds = (0 ..< tree.acceptedCount).map { self.candidateTreeFirstSeqId + llama_seq_id($0) }
+        for seqId in seqIds {
+            llama_kv_cache_seq_rm(context, seqId, -1, -1)
+            if !head.isEmpty {
+                llama_kv_cache_seq_cp(context, evalSeqId, seqId, 0, llama_pos(head.count))
+            }
+        }
+        defer {
+            for seqId in seqIds {
+                llama_kv_cache_seq_rm(context, seqId, -1, -1)
+            }
+        }
+
+        // 3. 木の節をまとめて 1 回で評価する
+        // 大きさは n_len(512)と candidateTreeMaximumCandidates(32)に合わせる
+        var treeBatch = self.candidateTreeBatch ?? llama_batch_init(512, 0, 32)
+        self.candidateTreeBatch = treeBatch
+        treeBatch.n_tokens = 0
+        for node in tree.nodes {
+            llama_batch_add(
+                &treeBatch,
+                node.token,
+                Int32(head.count + node.depth),
+                node.candidates.map { self.candidateTreeFirstSeqId + llama_seq_id($0) },
+                logits: true
+            )
+        }
+        if llama_decode(context, treeBatch) != 0 {
+            debug("llama_decode() failed for the candidate tree")
+            return failure
+        }
+
+        // 4. 節ごとに log softmax の正規化項を求め，候補ごとに対数確率を足す
+        let vocabSize = self.vocabSize
+        var normalizers: [Float] = []
+        normalizers.reserveCapacity(tree.nodes.count)
+        var rows: [UnsafeMutablePointer<Float>] = []
+        rows.reserveCapacity(tree.nodes.count)
+        for index in tree.nodes.indices {
+            guard let row = llama_get_logits_ith(context, Int32(index)) else {
+                return failure
+            }
+            rows.append(row)
+            normalizers.append(ZenzLogSumExp.compute(row, count: vocabSize))
+        }
+        let scores = tree.scores(endToken: self.endOfOutputToken) { node, token in
+            rows[node][Int(token)] - normalizers[node]
+        }
+        return (scores, tree.nodes.count)
+    }
+
+    /// 出力の終わりを表すトークン。zenz は語彙の「</s>」で出力を終える(GGUF の eos は別の番号を指していることがある)。
+    /// 「</s>」が無ければ語彙の eos を使う
+    private lazy var endOfOutputToken: llama_token = {
+        let count = min(self.vocabSize, 16)
+        for token in 0 ..< count {
+            if let text = llama_vocab_get_text(self.sharedModel.vocab, llama_token(token)), String(cString: text) == "</s>" {
+                return llama_token(token)
+            }
+        }
+        return self.eosToken
+    }()
 
     func previousEvaluationPrompt() -> String {
         self.prevPromptBySeq[evalSeqId] ?? ""

@@ -95,6 +95,30 @@ package final class Zenz {
         }
     }
 
+    /// 読みと文脈のもとで，与えた表記ごとの log P(表記 | 読み, 文脈) を，検証木で 1 回の推論にまとめて求める。
+    /// 木に入りきらなかった表記と，推論に失敗したときは nil
+    func scoreCandidates(
+        convertTarget: String,
+        texts: [String],
+        versionDependentConfig: ConvertRequestOptions.ZenzaiVersionDependentMode,
+        maximumTreeTokens: Int,
+        maximumCandidates: Int
+    ) -> (scores: [Float?], evaluatedTokens: Int) {
+        self.inferenceLock.withLock {
+            guard let zenzContext else {
+                return (texts.map { _ in nil }, 0)
+            }
+            return ZenzCandidateEvaluator.scoreCandidates(
+                context: zenzContext,
+                input: convertTarget.toKatakana(),
+                texts: texts,
+                versionDependentConfig: versionDependentConfig,
+                maximumTreeTokens: maximumTreeTokens,
+                maximumCandidates: maximumCandidates
+            )
+        }
+    }
+
     func predictNextInputText(
         leftSideContext: String,
         composingText: String,

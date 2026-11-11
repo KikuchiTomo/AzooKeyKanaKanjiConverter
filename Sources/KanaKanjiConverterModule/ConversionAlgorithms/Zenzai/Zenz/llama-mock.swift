@@ -65,4 +65,6 @@ package func llama_token_to_piece(_: llama_vocab, _: llama_token, _: UnsafeMutab
 
 package func llama_decode(_: llama_context, _: llama_batch) -> Int { unimplemented() }
 package func llama_get_logits(_: llama_context) -> UnsafeMutablePointer<Float>? { unimplemented() }
+package func llama_get_logits_ith(_: llama_context, _: Int32) -> UnsafeMutablePointer<Float>? { unimplemented() }
+package func llama_vocab_get_text(_: llama_vocab, _: llama_token) -> UnsafePointer<CChar>? { unimplemented() }
 #endif

@@ -428,6 +428,37 @@ struct ZenzCandidateEvaluator {
         )
     }
 
+    /// 表記ごとの log P(表記, 出力の終わり | 読み, 文脈) を検証木で求める(ZenzContext.scoreCandidateTree)。
+    /// プロンプトは候補の検証(evaluate)と同じ形にする。ユーザ辞書の条件は候補ごとに違うので入れない
+    static func scoreCandidates(
+        context: ZenzContext,
+        input: String,
+        texts: [String],
+        versionDependentConfig: ConvertRequestOptions.ZenzaiVersionDependentMode,
+        maximumTreeTokens: Int,
+        maximumCandidates: Int
+    ) -> (scores: [Float?], evaluatedTokens: Int) {
+        let prompt = ZenzPromptBuilder.candidateEvaluationPrompt(
+            input: input,
+            userDictionaryPrompt: "",
+            versionDependentConfig: versionDependentConfig
+        )
+        let promptTokens = context.encode(prompt, addBOS: true, addEOS: false)
+        let candidateTokens = texts.map {
+            context.encode(
+                self.candidateTextForEvaluation(candidateText: $0, input: input, inputCursorPosition: nil, versionDependentConfig: versionDependentConfig),
+                addBOS: false,
+                addEOS: false
+            )
+        }
+        return context.scoreCandidateTree(
+            promptTokens: promptTokens,
+            candidates: candidateTokens,
+            maximumNodes: maximumTreeTokens,
+            maximumCandidates: maximumCandidates
+        )
+    }
+
     static func candidateTextForEvaluation(
         candidateText: String,
         input: String,

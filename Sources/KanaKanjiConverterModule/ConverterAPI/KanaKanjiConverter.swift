@@ -413,6 +413,38 @@ public final class KanaKanjiConverter {
         )
     }
 
+    /// 読み(convertTarget)と文脈のもとで，与えた表記ごとの Zenzai の対数確率 log P(表記 | 読み, 文脈) を返す実験的API。
+    ///
+    /// 表記のトークン列を，共通の先頭を 1 つにまとめた木にして 1 回の推論で評価する(検証木)。どの方法で作った候補も
+    /// 同じ物差しで比べられる。前の表記ほど優先して木に入れ，入りきらなかった表記(トークンの数か候補の数の上限を超えたもの)は nil。
+    /// Zenzai が使えないときと推論に失敗したときもすべて nil。
+    /// - Parameters:
+    ///   - texts: 採点する表記
+    ///   - convertTarget: 読み(ひらがな)
+    ///   - options: Zenzai のモデルと左文脈(zenzaiMode)
+    ///   - maximumTreeTokens: 1 回の推論で評価するトークンの数の上限(根を含む)。時間はおおむねこれに比例する
+    ///   - maximumCandidates: 木に入れる表記の数の上限
+    /// - Warning: このAPIは experimental であり、予告なく変更または削除される可能性があります。
+    public func experimentalScoreCandidates(
+        _ texts: [String],
+        convertTarget: String,
+        options: ConvertRequestOptions,
+        maximumTreeTokens: Int = 192,
+        maximumCandidates: Int = 16
+    ) -> ExperimentalCandidateScores {
+        guard !texts.isEmpty, options.zenzaiMode.enabled, let zenz = self.getModel(modelURL: options.zenzaiMode.weightURL) else {
+            return ExperimentalCandidateScores(scores: texts.map { _ in nil }, evaluatedTokens: 0)
+        }
+        let result = zenz.scoreCandidates(
+            convertTarget: convertTarget,
+            texts: texts,
+            versionDependentConfig: options.zenzaiMode.versionDependentMode,
+            maximumTreeTokens: maximumTreeTokens,
+            maximumCandidates: maximumCandidates
+        )
+        return ExperimentalCandidateScores(scores: result.scores, evaluatedTokens: result.evaluatedTokens)
+    }
+
     /// 直前のLMベース typo correctionが行った探索量。性能テスト・診断用。
     var latestExperimentalTypoCorrectionMetrics: ZenzaiTypoGenerationMetrics {
         self.zenzaiTypoCache.lastMetrics
