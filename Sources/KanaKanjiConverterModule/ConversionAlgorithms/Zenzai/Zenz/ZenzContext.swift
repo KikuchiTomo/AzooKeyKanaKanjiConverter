@@ -36,7 +36,7 @@ private enum ZenzBackend {
         #if os(Windows) && (Zenzai || ZenzaiCPU)
         // Windows の llama.cpp は CPU の命令ごとの ggml-cpu-*.dll を実行時に選んで読む(GGML_BACKEND_DL)。
         // 実行ファイルの場所ではなく llama.dll と同じ場所から読む(テストでは llama.dll が PATH の先にある)
-        if let directory = llamaLibraryDirectory() {
+        if let directory = ZenzBackend.llamaLibraryDirectory() {
             ggml_backend_load_all_from_path(directory)
         } else {
             ggml_backend_load_all()
