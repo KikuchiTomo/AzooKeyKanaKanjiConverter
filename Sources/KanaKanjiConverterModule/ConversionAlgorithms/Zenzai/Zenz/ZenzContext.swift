@@ -31,7 +31,7 @@ enum ZenzError: LocalizedError {
 ///
 /// `llama_backend_free()` は現在 MPI 用の後始末にしか使われないため、モデルや
 /// コンテキストより先に解放される可能性があるプロセス終了時の明示解放は行わない。
-private enum ZenzBackend {
+enum ZenzBackend {
     private static let initialized: Void = {
         #if os(Windows) && (Zenzai || ZenzaiCPU)
         // Windows の llama.cpp は CPU の命令ごとの ggml-cpu-*.dll を実行時に選んで読む(GGML_BACKEND_DL)。
@@ -443,7 +443,7 @@ final class ZenzContext {
     /// 増えるため、最高性能クラスタの物理コア数を利用する。それ以外の環境では
     /// OSへ応答性の余地を残しつつ、llama.cppの小規模モデルで過剰並列にならない
     /// よう8スレッドを上限とする。
-    private static var inferenceThreadCount: Int {
+    static var inferenceThreadCount: Int {
         let activeProcessorCount = max(1, ProcessInfo.processInfo.activeProcessorCount)
         #if canImport(Darwin)
         let performanceCoreCount = self.sysctlInt32("hw.perflevel0.physicalcpu")

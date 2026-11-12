@@ -449,6 +449,34 @@ public final class KanaKanjiConverter {
         )
     }
 
+    /// 与えた表記が，読み全体を辞書の語でそのまま変換して作れるかを確かめる(読みにそろえる)。
+    ///
+    /// 表記を先頭の制約にして格子を引き直し，読み全体で同じ表記になる経路があれば，その候補(語ごとの表記・読み・品詞)を返す。
+    /// (制約の hasEOS はカーソルの位置で終わる変換のためのもので，最後の語を制約より短い経路にしか付けないので使わない)
+    /// 作れなければ nil。ほかのモデルが出した表記が読みと合うかを確かめ，文節に分けるのに使う。
+    /// - Parameters:
+    ///   - text: 確かめる表記
+    ///   - reading: 読み(ひらがな)
+    ///   - options: 辞書・学習の設定(Zenzai は使わない)
+    /// - Warning: このAPIは experimental であり、予告なく変更または削除される可能性があります。
+    public func experimentalAlignText(_ text: String, reading: String, options: ConvertRequestOptions) -> Candidate? {
+        guard !text.isEmpty, !reading.isEmpty else {
+            return nil
+        }
+        self.dicdataStoreState.updateIfRequired(options: options)
+        var composing = ComposingText()
+        composing.insertAtCursorPosition(reading, inputStyle: .direct)
+        let constraint = Kana2Kanji.PrefixConstraint(Array(text.utf8))
+        let result = self.converter.kana2lattice_all_with_prefix_constraint(
+            composing,
+            N_best: 3,
+            constraint: constraint,
+            dicdataStoreState: self.dicdataStoreState
+        )
+        let candidates = result.result.getCandidateData().map(self.converter.processClauseCandidate)
+        return candidates.first { $0.text == text }
+    }
+
     /// 直前のLMベース typo correctionが行った探索量。性能テスト・診断用。
     var latestExperimentalTypoCorrectionMetrics: ZenzaiTypoGenerationMetrics {
         self.zenzaiTypoCache.lastMetrics
