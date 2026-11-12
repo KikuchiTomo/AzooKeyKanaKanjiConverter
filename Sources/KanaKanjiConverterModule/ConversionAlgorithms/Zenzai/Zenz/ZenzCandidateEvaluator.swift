@@ -437,7 +437,7 @@ struct ZenzCandidateEvaluator {
         versionDependentConfig: ConvertRequestOptions.ZenzaiVersionDependentMode,
         maximumTreeTokens: Int,
         maximumCandidates: Int
-    ) -> (scores: [Float?], evaluatedTokens: Int) {
+    ) -> (scores: [Float?], evaluatedTokens: Int, decodedPromptTokens: Int) {
         let prompt = ZenzPromptBuilder.candidateEvaluationPrompt(
             input: input,
             userDictionaryPrompt: "",

@@ -533,14 +533,15 @@ final class ZenzContext {
     /// 木の節はすべてロジットを出し，候補のトークンごとの対数確率と，最後の節での「出力の終わり」の対数確率を足す。
     /// 評価のあとで候補の系列の KV は消す。評価の系列の KV は，前の評価と食い違う部分だけをプロンプトに置き換える(食い違った続きは次の評価で求め直される)。
     /// KV に空きが無いときは推論せず，すべて nil を返す。
-    /// - Returns: 候補ごとの点数(木に入りきらなかった候補と，推論に失敗したときは nil)と，評価したトークンの数(根を含む木の節の数)
+    /// - Returns: 候補ごとの点数(木に入りきらなかった候補と，推論に失敗したときは nil)，評価した木のトークンの数(根を含む節の数)，
+    ///   KV に無かったので評価し直したプロンプトのトークンの数
     func scoreCandidateTree(
         promptTokens: [llama_token],
         candidates: [[llama_token]],
         maximumNodes: Int,
         maximumCandidates: Int
-    ) -> (scores: [Float?], evaluatedTokens: Int) {
-        let failure = (scores: candidates.map { _ -> Float? in nil }, evaluatedTokens: 0)
+    ) -> (scores: [Float?], evaluatedTokens: Int, decodedPromptTokens: Int) {
+        var failure = (scores: candidates.map { _ -> Float? in nil }, evaluatedTokens: 0, decodedPromptTokens: 0)
         guard let rootToken = promptTokens.last else {
             return failure
         }
@@ -559,6 +560,8 @@ final class ZenzContext {
         // 1. プロンプトの最後を除いた部分を評価の系列に置く(前の評価と共通の先頭は使い回す)
         let previous = self.prevInputBySeq[evalSeqId] ?? []
         let common = previous.commonPrefix(with: head).count
+        let decodedPromptTokens = head.count - common
+        failure.decodedPromptTokens = decodedPromptTokens
         if common < head.count {
             llama_kv_cache_seq_rm(context, evalSeqId, llama_pos(common), -1)
             self.prevInputBySeq[evalSeqId] = Array(head.prefix(common))
@@ -622,7 +625,7 @@ final class ZenzContext {
         let scores = tree.scores(endToken: self.endOfOutputToken) { node, token in
             rows[node][Int(token)] - normalizers[node]
         }
-        return (scores, tree.nodes.count)
+        return (scores, tree.nodes.count, decodedPromptTokens)
     }
 
     /// 出力の終わりを表すトークン。zenz は語彙の「</s>」で出力を終える(GGUF の eos は別の番号を指していることがある)。

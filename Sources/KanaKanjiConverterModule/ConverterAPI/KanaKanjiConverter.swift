@@ -433,7 +433,7 @@ public final class KanaKanjiConverter {
         maximumCandidates: Int = 16
     ) -> ExperimentalCandidateScores {
         guard !texts.isEmpty, options.zenzaiMode.enabled, let zenz = self.getModel(modelURL: options.zenzaiMode.weightURL) else {
-            return ExperimentalCandidateScores(scores: texts.map { _ in nil }, evaluatedTokens: 0)
+            return ExperimentalCandidateScores(scores: texts.map { _ in nil }, evaluatedTokens: 0, decodedPromptTokens: 0)
         }
         let result = zenz.scoreCandidates(
             convertTarget: convertTarget,
@@ -442,7 +442,11 @@ public final class KanaKanjiConverter {
             maximumTreeTokens: maximumTreeTokens,
             maximumCandidates: maximumCandidates
         )
-        return ExperimentalCandidateScores(scores: result.scores, evaluatedTokens: result.evaluatedTokens)
+        return ExperimentalCandidateScores(
+            scores: result.scores,
+            evaluatedTokens: result.evaluatedTokens,
+            decodedPromptTokens: result.decodedPromptTokens
+        )
     }
 
     /// 直前のLMベース typo correctionが行った探索量。性能テスト・診断用。

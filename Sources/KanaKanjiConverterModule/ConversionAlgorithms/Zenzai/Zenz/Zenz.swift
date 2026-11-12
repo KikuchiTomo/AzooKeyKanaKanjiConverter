@@ -103,10 +103,10 @@ package final class Zenz {
         versionDependentConfig: ConvertRequestOptions.ZenzaiVersionDependentMode,
         maximumTreeTokens: Int,
         maximumCandidates: Int
-    ) -> (scores: [Float?], evaluatedTokens: Int) {
+    ) -> (scores: [Float?], evaluatedTokens: Int, decodedPromptTokens: Int) {
         self.inferenceLock.withLock {
             guard let zenzContext else {
-                return (texts.map { _ in nil }, 0)
+                return (texts.map { _ in nil }, 0, 0)
             }
             return ZenzCandidateEvaluator.scoreCandidates(
                 context: zenzContext,

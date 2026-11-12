@@ -8,12 +8,15 @@ import Foundation
 public struct ExperimentalCandidateScores: Sendable, Equatable {
     /// 表記ごとの log P(表記 | 読み, 文脈)。採点できなかった表記は nil
     public var scores: [Float?]
-    /// 1 回の推論で評価したトークンの数(検証木の節の数)。時間の見積もりに使う
+    /// 1 回の推論で評価した木のトークンの数(検証木の節の数)。時間の見積もりに使う
     public var evaluatedTokens: Int
+    /// KV に無かったので，木の前に評価し直したプロンプトのトークンの数。時間の見積もりに使う
+    public var decodedPromptTokens: Int
 
-    public init(scores: [Float?], evaluatedTokens: Int) {
+    public init(scores: [Float?], evaluatedTokens: Int, decodedPromptTokens: Int) {
         self.scores = scores
         self.evaluatedTokens = evaluatedTokens
+        self.decodedPromptTokens = decodedPromptTokens
     }
 }
 
