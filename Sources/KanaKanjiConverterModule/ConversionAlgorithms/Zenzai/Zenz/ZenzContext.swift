@@ -5,6 +5,9 @@ import llama
 #if canImport(Darwin)
 import Darwin
 #endif
+#if os(Windows) && (Zenzai || ZenzaiCPU)
+import WinSDK
+#endif
 
 import Algorithms
 import Foundation
@@ -30,8 +33,45 @@ enum ZenzError: LocalizedError {
 /// コンテキストより先に解放される可能性があるプロセス終了時の明示解放は行わない。
 private enum ZenzBackend {
     private static let initialized: Void = {
+        #if os(Windows) && (Zenzai || ZenzaiCPU)
+        // Windows の llama.cpp は CPU の命令ごとの ggml-cpu-*.dll を実行時に選んで読む(GGML_BACKEND_DL)。
+        // 実行ファイルの場所ではなく llama.dll と同じ場所から読む(テストでは llama.dll が PATH の先にある)
+        if let directory = llamaLibraryDirectory() {
+            ggml_backend_load_all_from_path(directory)
+        } else {
+            ggml_backend_load_all()
+        }
+        #endif
+        #if canImport(Darwin) && (Zenzai || ZenzaiCPU)
+        // b9637 の Metal は，プロセスの終わりに残った residency set があると GGML_ASSERT で止まる(ggml_metal_rsets_free)。
+        // モデルはプロセスの終わりまで持つので，residency set を使わない。利用者が環境変数で決めていればそれに従う
+        setenv("GGML_METAL_NO_RESIDENCY", "1", 0)
+        #endif
+        #if ZenzaiCPU && canImport(Darwin)
+        // b9637 ではバックエンドを登録するときに Metal も初期化される。CPU で推論するときは Metal を読まない
+        setenv("GGML_DISABLE_METAL", "1", 0)
+        #endif
         llama_backend_init()
     }()
+
+    #if os(Windows) && (Zenzai || ZenzaiCPU)
+    /// 読み込んだ llama.dll のあるフォルダ(UTF-8)
+    private static func llamaLibraryDirectory() -> String? {
+        guard let module = "llama.dll".withCString(encodedAs: UTF16.self, { GetModuleHandleW($0) }) else {
+            return nil
+        }
+        var buffer = [WCHAR](repeating: 0, count: 32_768)
+        let length = Int(GetModuleFileNameW(module, &buffer, DWORD(buffer.count)))
+        guard length > 0, length < buffer.count else {
+            return nil
+        }
+        let path = String(decoding: buffer[..<length], as: UTF16.self)
+        guard let separator = path.lastIndex(where: { $0 == "\\" || $0 == "/" }) else {
+            return nil
+        }
+        return String(path[..<separator])
+    }
+    #endif
 
     static func initializeIfNeeded() {
         _ = self.initialized
@@ -355,6 +395,12 @@ final class ZenzContext {
     private var candidateTreeBatch: llama_batch?
     /// 検証木で 1 回に評価する候補の数の上限(系列 ID の数)。バッチの大きさを決めるので固定する
     static let candidateTreeMaximumCandidates = 32
+    /// KV に置く系列の数(評価・入力予測・検証木の候補)
+    private static let sequenceCount = 2 + candidateTreeMaximumCandidates
+
+    private var memory: llama_memory_t {
+        llama_get_memory(self.context)
+    }
 
     private init(sharedModel: SharedZenzModel, context: OpaquePointer) {
         self.sharedModel = sharedModel
@@ -375,7 +421,11 @@ final class ZenzContext {
         debug("Using \(n_threads) threads")
         var ctx_params = llama_context_default_params()
         ctx_params.n_ctx = 512
-        ctx_params.flash_attn = true
+        // 評価(0)・入力予測(1)・検証木の候補(2 から)の系列を 1 つの KV に置く。
+        // 系列どうしはプロンプトの大部分を共有するので，KV を系列ごとに分けず，512 の容量を共有する
+        ctx_params.n_seq_max = UInt32(Self.sequenceCount)
+        ctx_params.kv_unified = true
+        ctx_params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
         ctx_params.n_threads       = Int32(n_threads)
         ctx_params.n_threads_batch = Int32(n_threads)
         ctx_params.n_batch = 512
@@ -489,8 +539,8 @@ final class ZenzContext {
             if otherPrefix > currentPrefix {
                 let copiedPrefixCount = min(otherPrefix, logits_start_index)
                 if copiedPrefixCount > 0 {
-                    llama_kv_cache_seq_rm(context, seqId, 0, -1)
-                    llama_kv_cache_seq_cp(context, otherSeqId, seqId, 0, llama_pos(copiedPrefixCount))
+                    llama_memory_seq_rm(self.memory, seqId, 0, -1)
+                    llama_memory_seq_cp(self.memory, otherSeqId, seqId, 0, llama_pos(copiedPrefixCount))
                     effectivePrevInput = otherPrevInput
                 }
             }
@@ -499,14 +549,14 @@ final class ZenzContext {
         // Manage KV cache: remove entries that differ from previous input
         let prefixCacheCount: Int
         do {
-            let pos_max = llama_kv_cache_seq_pos_max(self.context, seqId)
+            let pos_max = llama_memory_seq_pos_max(self.memory, seqId)
             debug("pos max:", pos_max, "prevInput count:", effectivePrevInput.count, "tokens count:", tokens.count)
             let commonTokens = effectivePrevInput.commonPrefix(with: tokens)
             // Remove KV cache from position commonTokens.count onwards to recompute divergent part
             // removed range: [llama_pos(commonTokens.count), inf)
             prefixCacheCount = min(commonTokens.count, logits_start_index)
-            llama_kv_cache_seq_rm(context, seqId, llama_pos(prefixCacheCount), -1)
-            debug("new pos max:", llama_kv_cache_seq_pos_max(self.context, seqId), "commonTokens:", commonTokens.count)
+            llama_memory_seq_rm(self.memory, seqId, llama_pos(prefixCacheCount), -1)
+            debug("new pos max:", llama_memory_seq_pos_max(self.memory, seqId), "commonTokens:", commonTokens.count)
         }
         self.batch.n_tokens = 0
         let n_ctx = llama_n_ctx(context)
@@ -563,7 +613,7 @@ final class ZenzContext {
         let decodedPromptTokens = head.count - common
         failure.decodedPromptTokens = decodedPromptTokens
         if common < head.count {
-            llama_kv_cache_seq_rm(context, evalSeqId, llama_pos(common), -1)
+            llama_memory_seq_rm(self.memory, evalSeqId, llama_pos(common), -1)
             self.prevInputBySeq[evalSeqId] = Array(head.prefix(common))
             self.batch.n_tokens = 0
             for i in common ..< head.count {
@@ -579,14 +629,14 @@ final class ZenzContext {
         // 2. 候補ごとの系列にプロンプトを写す(KV を足さずにセルに系列 ID を足すだけ)
         let seqIds = (0 ..< tree.acceptedCount).map { self.candidateTreeFirstSeqId + llama_seq_id($0) }
         for seqId in seqIds {
-            llama_kv_cache_seq_rm(context, seqId, -1, -1)
+            llama_memory_seq_rm(self.memory, seqId, -1, -1)
             if !head.isEmpty {
-                llama_kv_cache_seq_cp(context, evalSeqId, seqId, 0, llama_pos(head.count))
+                llama_memory_seq_cp(self.memory, evalSeqId, seqId, 0, llama_pos(head.count))
             }
         }
         defer {
             for seqId in seqIds {
-                llama_kv_cache_seq_rm(context, seqId, -1, -1)
+                llama_memory_seq_rm(self.memory, seqId, -1, -1)
             }
         }
 

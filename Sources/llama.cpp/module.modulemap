@@ -5,6 +5,7 @@ module llama [system] {
     header "ggml-backend.h"
 
     link "llama"
+    link "ggml"
 
     export *
 }
